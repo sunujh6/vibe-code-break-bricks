@@ -1,0 +1,555 @@
+import React, { useEffect, useRef, useState } from "react";
+
+/**
+ * React Breakout — 멀티볼/크랙/아이템 + 제한 & 난이도 스케일
+ * 요구사항 반영:
+ * - 레벨 최대 5 (클리어 시 승리)
+ * - 시도(라이프) 최대 2
+ * - 공 생성 아이템은 **최대 4회**만 발동, 그 중 **최대 1회 관통(피어싱) 공** 생성
+ * - 레벨이 오를수록 공 속도 **레벨당 +5%**
+ * - 크랙 벽돌은 **빨간색**으로 표시 (HP≥2)
+ * - 레벨이 오를수록 브릭 수 증가 또는 HP가 높은 하드브릭 비율 증가(HP 3도 등장)
+ * - 기존 반사각 +10%, 최소 상향속도 보장 유지, Space/클릭 시작/정지/발사, 게임오버 팝업 유지
+ */
+
+// ===== 설정값 =====
+const W = 720;            // 캔버스 폭
+const H = 480;            // 캔버스 높이
+const PADDLE_W = 110;
+const PADDLE_H = 16;
+const BALL_R = 8;
+const INIT_SPEED = 340;    // px/s (기준 속도)
+const LIVES_INIT = 2;      // 최대 2회 시도
+const MAX_LEVEL = 5;
+const MAX_ITEM_BALLS = 4;  // 아이템으로 생성 가능한 공의 총 개수 제한(게임 전체)
+
+// 브릭 레이아웃
+const MARGIN_X = 32;
+const MARGIN_TOP = 56;
+const GAP_X = 8;
+const GAP_Y = 10;
+
+// 아이템 타입
+const ITEM_NONE = 0;
+const ITEM_MULTIBALL = 1; // 공 1개 추가(피어싱 여부는 스폰 시 결정)
+
+function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
+function rand(min, max) { return Math.random() * (max - min) + min; }
+const deg2rad = (d) => (Math.PI / 180) * d;
+const speedForLevel = (lvl) => INIT_SPEED * Math.pow(1.05, Math.max(0, lvl - 1));
+
+// --- 도우미: 원-사각형 충돌 ---
+function circleRectCollide(cx, cy, r, rx, ry, rw, rh) {
+  const closestX = clamp(cx, rx, rx + rw);
+  const closestY = clamp(cy, ry, ry + rh);
+  const dx = cx - closestX;
+  const dy = cy - closestY;
+  return dx * dx + dy * dy <= r * r;
+}
+
+// --- 간단 Self Tests (개발 시 콘솔 확인) ---
+function runSelfTests() {
+  try {
+    // 1) 충돌 판정 테스트
+    console.assert(circleRectCollide(12, 12, 5, 10, 10, 10, 10) === true, "circleRectCollide overlapping");
+    console.assert(circleRectCollide(0, 0, 4, 20, 20, 10, 10) === false, "circleRectCollide far");
+    console.assert(circleRectCollide(10, 10, 5, 15, 6, 10, 8) === true, "touching edge = collision");
+
+    // 2) 반사 각도/속도 테스트
+    const speed = 400;
+    const testBounce = (rel) => {
+      let angleDeg = -65 + 130 * ((rel + 1) / 2);
+      angleDeg = clamp(angleDeg * 1.1, -78, 78);
+      const a = deg2rad(angleDeg);
+      let vx = Math.cos(a) * speed;
+      let vy = -Math.abs(Math.sin(a) * speed);
+      const minVy = speed * 0.35;
+      if (Math.abs(vy) < minVy) vy = -minVy;
+      return { vx, vy };
+    };
+    const bCenter = testBounce(0);
+    const bLeft = testBounce(-1);
+    const bRight = testBounce(1);
+    console.assert(bCenter.vy < 0 && Math.abs(bCenter.vy) >= speed * 0.35, "center bounce up w/ minVy");
+    console.assert(bLeft.vy < 0 && bRight.vy < 0, "edge bounces up");
+    console.assert(bLeft.vx < 0 && bRight.vx > 0, "vx reflects L/R");
+
+    // 3) 속도 스케일 테스트(레벨당 +5%) — 공차 1e-6 허용
+    const s1 = speedForLevel(1), s2 = speedForLevel(2), s5 = speedForLevel(5);
+    console.assert(Math.abs(s2 - s1 * 1.05) < 1e-6, "lvl2 speed = lvl1*1.05");
+    console.assert(Math.abs(s5 - s1 * Math.pow(1.05, 4)) < 1e-6, "lvl5 speed = lvl1*1.05^4");
+
+    // 4) 하드브릭 크랙 전이
+    (function(){
+      const br = { hp:2, maxHp:2, cracked:false };
+      br.hp -= 1; if (br.maxHp > 1 && br.hp < br.maxHp) br.cracked = true;
+      console.assert(br.cracked === true && br.hp === 1, "hard brick should crack when hp drops");
+    })();
+
+    // 5) 아이템 제한(최대 4)
+    (function(){
+      const max = 4; let spawned = 0; for (let i=0;i<10;i++){ if (spawned < max) spawned++; }
+      console.assert(spawned === 4, "item-spawn cap should not exceed 4");
+    })();
+
+    // 6) clamp
+    console.assert(clamp(5, 0, 10) === 5, "clamp inside");
+    console.assert(clamp(-5, 0, 10) === 0, "clamp lower bound");
+    console.assert(clamp(15, 0, 10) === 10, "clamp upper bound");
+
+    console.log("[Breakout] Self-tests passed");
+  } catch (e) {
+    console.warn("[Breakout] Self-tests failed:", e);
+  }
+}
+
+export default function Breakout() {
+  const canvasRef = useRef(null);
+  const rafRef = useRef(0);
+  const lastRef = useRef(0);
+  const speedRef = useRef(speedForLevel(1));
+
+  const [score, setScore] = useState(0);
+  const [lives, setLives] = useState(LIVES_INIT);
+  const [level, setLevel] = useState(1);
+  const [running, setRunning] = useState(false);
+  const [paused, setPaused] = useState(false);
+  const [message, setMessage] = useState("클릭 또는 Space로 시작");
+  const [gameOverOpen, setGameOverOpen] = useState(false);
+  const [winOpen, setWinOpen] = useState(false);
+
+  // 가변 게임 객체 (렌더 트리 재생성 없이 갱신)
+  const paddle = useRef({ x: W / 2, y: H - 48, w: PADDLE_W, h: PADDLE_H, dir: 0 });
+  // 멀티볼: 배열로 관리. index 0 = 메인볼(시작/Space로 붙었다가 발사)
+  const balls = useRef([]); // {x,y,vx,vy,r,stuck,main,piercing}
+  const bricks = useRef([]); // {x,y,w,h,hp,maxHp,cracked,item}
+
+  // 아이템 스폰 제한 관리
+  const itemBallCountRef = useRef(0);   // 생성한 아이템 공 수
+  const piercingGivenRef = useRef(false); // 관통 공을 이미 한 번 줬는가
+
+  // DPI 스케일 조정
+  useEffect(() => {
+    const c = canvasRef.current;
+    if (!c) return;
+    const dpr = Math.max(1, window.devicePixelRatio || 1);
+    c.width = W * dpr; c.height = H * dpr; c.style.width = W + "px"; c.style.height = H + "px";
+    const ctx = c.getContext("2d");
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }, []);
+
+  // 레벨에 따른 브릭 생성
+  const computeBrickGrid = (lvl) => {
+    const cols = 10;
+    // 레벨이 오를수록 행 수 증가(최대 12)
+    const rows = clamp(4 + lvl * 2 - 1, 5, 12); // L1=5, L5≈13→12로 클램프
+    const cellW = Math.floor((W - MARGIN_X * 2 - GAP_X * (cols - 1)) / cols);
+    const cellH = 22;
+    const bw = Math.floor(cellW * 0.8);
+    const bh = Math.floor(cellH * 0.8);
+    const offX = Math.floor((cellW - bw) / 2);
+    const offY = Math.floor((cellH - bh) / 2);
+
+    // 하드브릭(HP≥2) 비율 증가, HP=3은 고레벨에서 등장
+    const pHard = clamp(0.25 + 0.08 * (lvl - 1), 0.25, 0.6);
+    const pHp3  = lvl >= 4 ? clamp(0.10 + 0.05 * (lvl - 4), 0.1, 0.25) : 0; // L4부터 일부 3HP
+
+    // 남은 아이템 슬롯(아이콘 표시도 제한적으로)
+    let remainingItems = Math.max(0, MAX_ITEM_BALLS - itemBallCountRef.current);
+
+    const arr = [];
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        const cellX = MARGIN_X + c * (cellW + GAP_X);
+        const cellY = MARGIN_TOP + r * (cellH + GAP_Y);
+        let maxHp = 1;
+        if (Math.random() < pHard) maxHp = 2;
+        if (Math.random() < pHp3) maxHp = 3;
+
+        let item = ITEM_NONE;
+        if (remainingItems > 0 && Math.random() < 0.12) {
+          item = ITEM_MULTIBALL;
+          remainingItems--;
+        }
+
+        arr.push({ x: cellX + offX, y: cellY + offY, w: bw, h: bh, hp: maxHp, maxHp, cracked: false, item });
+      }
+    }
+    return arr;
+  };
+
+  // 볼 생성
+  const spawnBall = (x, y, speed = speedRef.current, piercing = false) => {
+    const angDeg = rand(30, 150); // 위쪽으로 발사
+    const a = deg2rad(angDeg);
+    balls.current.push({ x, y, vx: Math.cos(a) * speed, vy: -Math.abs(Math.sin(a) * speed), r: BALL_R, stuck: false, main: false, piercing });
+  };
+
+  // 게임 리셋/시작
+  const resetBallAndPaddle = () => {
+    paddle.current.x = W / 2; paddle.current.y = H - 48; paddle.current.dir = 0;
+    balls.current = [];
+    const x = paddle.current.x; const y = paddle.current.y - 22;
+    const ang = deg2rad(rand(30, 150));
+    const vx = speedRef.current * Math.cos(ang);
+    let vy = -Math.abs(speedRef.current * Math.sin(ang));
+    if (vy > -120) vy = -120; // 너무 수평 방지(시작 시)
+    balls.current.push({ x, y, vx, vy, r: BALL_R, stuck: true, main: true, piercing: false });
+  };
+
+  const newGame = () => {
+    setScore(0); setLives(LIVES_INIT); setLevel(1);
+    speedRef.current = speedForLevel(1);
+    itemBallCountRef.current = 0;
+    piercingGivenRef.current = false;
+    bricks.current = computeBrickGrid(1);
+    resetBallAndPaddle();
+    setMessage("클릭 또는 Space로 시작");
+    setRunning(false); setPaused(false); setGameOverOpen(false); setWinOpen(false);
+  };
+
+  // 최초 마운트 시 새 게임 + self-tests 실행
+  useEffect(() => { newGame(); runSelfTests(); /* eslint-disable-next-line */ }, []);
+
+  // 입력 처리
+  useEffect(() => {
+    const onKey = (e) => {
+      if (e.type === "keydown") {
+        if (e.code === "ArrowLeft" || e.code === "KeyA") paddle.current.dir = -1;
+        if (e.code === "ArrowRight" || e.code === "KeyD") paddle.current.dir = 1;
+
+        if (e.code === "Space") {
+          if (gameOverOpen || winOpen) { newGame(); return; } // 팝업 → 새 게임
+          const main = balls.current[0];
+          if (!running) { setRunning(true); setMessage(""); if (main) main.stuck = false; return; }
+          if (paused) { setPaused(false); return; }
+          if (main && main.stuck) { main.stuck = false; return; }
+          setPaused((p) => !p);
+        }
+
+        if (e.code === "Enter" && (gameOverOpen || winOpen)) newGame();
+      } else {
+        if ((e.code === "ArrowLeft" || e.code === "KeyA") && paddle.current.dir === -1) paddle.current.dir = 0;
+        if ((e.code === "ArrowRight" || e.code === "KeyD") && paddle.current.dir === 1) paddle.current.dir = 0;
+      }
+    };
+
+    const onMouseMove = (e) => {
+      const rect = canvasRef.current?.getBoundingClientRect();
+      if (!rect) return;
+      const x = clamp(e.clientX - rect.left, 0, W);
+      paddle.current.x = clamp(x, PADDLE_W / 2, W - PADDLE_W / 2);
+      const main = balls.current[0];
+      if (main && main.stuck) { main.x = paddle.current.x; main.y = paddle.current.y - 22; }
+    };
+
+    const onTouchMove = (e) => {
+      const t = e.touches[0]; if (!t) return;
+      const rect = canvasRef.current?.getBoundingClientRect();
+      const x = clamp(t.clientX - rect.left, 0, W);
+      paddle.current.x = clamp(x, PADDLE_W / 2, W - PADDLE_W / 2);
+      const main = balls.current[0];
+      if (main && main.stuck) { main.x = paddle.current.x; main.y = paddle.current.y - 22; }
+    };
+
+    window.addEventListener("keydown", onKey);
+    window.addEventListener("keyup", onKey);
+    window.addEventListener("mousemove", onMouseMove);
+    window.addEventListener("touchmove", onTouchMove, { passive: true });
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("keyup", onKey);
+      window.removeEventListener("mousemove", onMouseMove);
+      window.removeEventListener("touchmove", onTouchMove);
+    };
+  }, [running, paused, gameOverOpen, winOpen]);
+
+  // 크랙 그리기 (HP가 줄어든 상태 시각화)
+  const drawCrack = (ctx, b) => {
+    ctx.save();
+    ctx.strokeStyle = "rgba(15,23,42,0.85)";
+    ctx.lineWidth = 1;
+    const cx = b.x + b.w / 2;
+    const cy = b.y + b.h / 2;
+    ctx.beginPath(); ctx.moveTo(b.x + 2, cy); ctx.lineTo(b.x + b.w - 2, cy); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(b.x + 2, b.y + 2); ctx.lineTo(b.x + b.w - 2, b.y + b.h - 2); ctx.stroke();
+    if (b.maxHp >= 3) { // HP3는 금 하나 더
+      ctx.beginPath(); ctx.moveTo(b.x + b.w/2, b.y + 2); ctx.lineTo(b.x + b.w/2, b.y + b.h - 2); ctx.stroke();
+    } else {
+      ctx.beginPath(); ctx.moveTo(b.x + 2, b.y + b.h - 2); ctx.lineTo(b.x + b.w - 2, b.y + 2); ctx.stroke();
+    }
+    ctx.restore();
+  };
+
+  // 아이콘(멀티볼) 그리기
+  const drawItemIcon = (ctx, b) => {
+    if (b.item !== ITEM_MULTIBALL) return;
+    ctx.save();
+    ctx.translate(b.x + b.w / 2, b.y + b.h / 2);
+    ctx.beginPath();
+    ctx.arc(0, 0, Math.min(b.w, b.h) * 0.22, 0, Math.PI * 2);
+    ctx.fillStyle = "#f8fafc";
+    ctx.fill();
+    ctx.lineWidth = 1; ctx.strokeStyle = "#0f172a"; ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(-3, 0); ctx.lineTo(3, 0); ctx.moveTo(0, -3); ctx.lineTo(0, 3); ctx.stroke();
+    ctx.restore();
+  };
+
+  // 게임 루프
+  useEffect(() => {
+    const ctx = canvasRef.current?.getContext("2d");
+    if (!ctx) return;
+
+    const drawBricks = () => {
+      for (const b of bricks.current) {
+        if (b.hp <= 0) continue;
+        // 빨간색: 하드브릭(HP>=2)
+        ctx.fillStyle = b.maxHp >= 2 ? "#ef4444" : "#38bdf8";
+        ctx.fillRect(b.x, b.y, b.w, b.h);
+        ctx.strokeStyle = "rgba(15,23,42,0.35)";
+        ctx.strokeRect(b.x + 0.5, b.y + 0.5, b.w - 1, b.h - 1);
+        if (b.maxHp > 1 && b.hp < b.maxHp) drawCrack(ctx, b);
+        drawItemIcon(ctx, b);
+      }
+    };
+
+    const drawPaddle = () => {
+      ctx.fillStyle = "#eab308";
+      const { x, y, w, h } = paddle.current;
+      ctx.fillRect(x - w / 2, y - h / 2, w, h);
+    };
+
+    const drawBalls = () => {
+      for (const ball of balls.current) {
+        ctx.beginPath();
+        ctx.arc(ball.x, ball.y, ball.r, 0, Math.PI * 2);
+        // 피어싱: 녹색, 메인: 흰, 추가: 연보라
+        ctx.fillStyle = ball.piercing ? "#34d399" : (ball.main ? "#f8fafc" : "#c7d2fe");
+        ctx.fill();
+        ctx.closePath();
+      }
+    };
+
+    const drawHUD = () => {
+      ctx.fillStyle = "#94a3b8";
+      ctx.font = "bold 14px ui-sans-serif, -apple-system, Segoe UI";
+      ctx.fillText(`Score: ${score}`, 12, 18);
+      ctx.fillText(`Lives: ${lives}`, 110, 18);
+      ctx.fillText(`Level: ${level}/${MAX_LEVEL}`, 190, 18);
+      if (!running || paused) {
+        ctx.fillStyle = "rgba(0,0,0,0.55)";
+        ctx.fillRect(0, 0, W, H);
+        ctx.fillStyle = "#e2e8f0";
+        ctx.font = "bold 22px ui-sans-serif";
+        ctx.textAlign = "center";
+        ctx.fillText(paused ? "일시정지" : message, W / 2, H / 2 - 8);
+        ctx.font = "normal 13px ui-sans-serif";
+        ctx.fillText("Space: 시작/일시정지/발사  •  ←/→ 또는 마우스/터치로 이동", W / 2, H / 2 + 18);
+        ctx.textAlign = "start";
+      }
+    };
+
+    const step = (t) => {
+      const now = t / 1000; // s
+      const last = lastRef.current || now;
+      const dt = clamp(now - last, 0, 0.03); // 33ms clamp
+      lastRef.current = now;
+
+      // 업데이트
+      if (running && !paused) {
+        // 패들 이동 (키보드)
+        const px = paddle.current.x + paddle.current.dir * 520 * dt;
+        paddle.current.x = clamp(px, PADDLE_W / 2, W - PADDLE_W / 2);
+        const main = balls.current[0];
+        if (main && main.stuck) { main.x = paddle.current.x; main.y = paddle.current.y - 22; }
+        else {
+          // 각 볼 업데이트
+          for (const ball of balls.current) {
+            ball.x += ball.vx * dt;
+            ball.y += ball.vy * dt;
+
+            // 벽 반사
+            if (ball.x < BALL_R) { ball.x = BALL_R; ball.vx *= -1; }
+            if (ball.x > W - BALL_R) { ball.x = W - BALL_R; ball.vx *= -1; }
+            if (ball.y < BALL_R) { ball.y = BALL_R; ball.vy *= -1; }
+
+            // 패들 충돌 (반사각 10% 증가 + 클램프)
+            const { x: px2, y: py2, w, h } = paddle.current;
+            if (circleRectCollide(ball.x, ball.y, BALL_R, px2 - w / 2, py2 - h / 2, w, h) && ball.vy > 0) {
+              const rel = clamp((ball.x - px2) / (w / 2), -1, 1);
+              const speed = Math.hypot(ball.vx, ball.vy);
+              let angleDeg = -65 + 130 * ((rel + 1) / 2);
+              angleDeg = clamp(angleDeg * 1.1, -78, 78);
+              const a = deg2rad(angleDeg);
+              ball.vx = Math.cos(a) * speed;
+              ball.vy = -Math.abs(Math.sin(a) * speed);
+              const minVy = speed * 0.35;
+              if (Math.abs(ball.vy) < minVy) ball.vy = -minVy;
+              ball.y = py2 - h / 2 - BALL_R - 0.1;
+            }
+          }
+
+          // 브릭 충돌 (볼마다 1프레임당 여러 개 가능: 피어싱 고려)
+          for (const ball of balls.current) {
+            for (const b of bricks.current) {
+              if (b.hp <= 0) continue;
+              if (circleRectCollide(ball.x, ball.y, BALL_R, b.x, b.y, b.w, b.h)) {
+                // 충돌축 결정(비피어싱일 때만 반사)
+                if (!ball.piercing) {
+                  const prevX = ball.x - ball.vx * dt;
+                  const prevY = ball.y - ball.vy * dt;
+                  const hitXBefore = prevX < b.x || prevX > b.x + b.w;
+                  const hitYBefore = prevY < b.y || prevY > b.y + b.h;
+                  if (hitXBefore && !hitYBefore) ball.vx *= -1; else ball.vy *= -1;
+                }
+
+                // 브릭 데미지 & 크랙
+                b.hp -= 1;
+                if (b.maxHp > 1 && b.hp < b.maxHp) b.cracked = true;
+
+                // 점수
+                setScore((s) => s + (b.hp <= 0 ? 50 : 20));
+
+                // 파괴 시 아이템 처리(전역 제한 준수)
+                if (b.hp <= 0 && b.item === ITEM_MULTIBALL && itemBallCountRef.current < MAX_ITEM_BALLS) {
+                  itemBallCountRef.current++;
+                  const remainingSlots = MAX_ITEM_BALLS - itemBallCountRef.current + (piercingGivenRef.current ? 0 : 1);
+                  // 저수지 샘플링 느낌으로, 남은 슬롯 수에 비례해 1회만 피어싱 부여
+                  let givePiercing = false;
+                  if (!piercingGivenRef.current) {
+                    const denom = Math.max(1, MAX_ITEM_BALLS - (itemBallCountRef.current - 1));
+                    if (Math.random() < 1 / denom) givePiercing = true;
+                  }
+                  if (givePiercing) piercingGivenRef.current = true;
+
+                  const cx = b.x + b.w / 2; const cy = b.y + b.h / 2;
+                  spawnBall(cx, cy, speedRef.current * 0.95, givePiercing);
+                }
+
+                // 피어싱이면 같은 프레임에 다른 브릭도 계속 체크, 비피어싱이면 종료
+                if (!ball.piercing) break;
+              }
+            }
+          }
+
+          // 바닥 이탈한 볼 제거
+          for (let i = balls.current.length - 1; i >= 0; i--) {
+            if (balls.current[i].y > H + BALL_R) {
+              balls.current.splice(i, 1);
+            }
+          }
+
+          // 모든 볼이 사라지면 목숨 감소 및 리셋
+          if (balls.current.length === 0) {
+            setLives((L) => {
+              const left = L - 1;
+              if (left <= 0) {
+                setRunning(false); setPaused(false); setGameOverOpen(true);
+                return 0;
+              } else {
+                resetBallAndPaddle();
+                const main2 = balls.current[0]; if (main2) main2.stuck = true;
+                return left;
+              }
+            });
+          }
+
+          // 레벨 클리어
+          if (bricks.current.every((b) => b.hp <= 0)) {
+            setLevel((lv) => {
+              const nxt = lv + 1;
+              if (nxt > MAX_LEVEL) {
+                setRunning(false); setPaused(false); setWinOpen(true);
+                return lv; // 레벨 유지 표시
+              }
+              speedRef.current = speedForLevel(nxt);
+              bricks.current = computeBrickGrid(nxt);
+              resetBallAndPaddle();
+              const main2 = balls.current[0]; if (main2) main2.stuck = true;
+              setMessage(`Level ${nxt}! Space로 시작`);
+              setRunning(false); setPaused(false);
+              return nxt;
+            });
+          }
+        }
+      }
+
+      // 그리기
+      ctx.clearRect(0, 0, W, H);
+      // 배경
+      const g = ctx.createLinearGradient(0, 0, 0, H);
+      g.addColorStop(0, "#0f172a");
+      g.addColorStop(1, "#111827");
+      ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+
+      drawBricks();
+      drawPaddle();
+      drawBalls();
+      drawHUD();
+
+      rafRef.current = requestAnimationFrame(step);
+    };
+
+    rafRef.current = requestAnimationFrame(step);
+    return () => cancelAnimationFrame(rafRef.current);
+  }, [running, paused, score, lives, level]);
+
+  const onCanvasClick = () => {
+    if (gameOverOpen || winOpen) return;
+    const main = balls.current[0];
+    if (!running) { setRunning(true); setMessage(""); if (main) main.stuck = false; return; }
+    if (paused) { setPaused(false); return; }
+    if (main && main.stuck) { main.stuck = false; return; }
+  };
+
+  return (
+    <div className="min-h-[100dvh] bg-neutral-900 text-neutral-100 py-6">
+      <div className="max-w-5xl mx-auto px-4 grid gap-4">
+        <header className="flex items-center justify-between gap-3 flex-wrap">
+          <h1 className="text-2xl md:text-3xl font-bold">React 벽돌깨기 — 제한 & 피어싱 멀티볼</h1>
+          <div className="flex items-center gap-2">
+            <button onClick={() => { setPaused((p) => !p); setRunning(true); setMessage(""); const m = balls.current[0]; if (m) m.stuck = false; }} className="px-3 py-2 rounded-xl bg-neutral-800 hover:bg-neutral-700">{paused || !running ? "시작/계속" : "일시정지"}</button>
+            <button onClick={newGame} className="px-3 py-2 rounded-xl bg-neutral-800 hover:bg-neutral-700">새 게임</button>
+          </div>
+        </header>
+
+        <div className="rounded-2xl shadow-inner ring-1 ring-neutral-700 overflow-hidden w-fit mx-auto">
+          <canvas ref={canvasRef} width={W} height={H} onClick={onCanvasClick} className="block bg-neutral-950 cursor-pointer select-none"/>
+        </div>
+
+        <div className="text-xs text-neutral-400 text-center">
+          조작: ←/→ 또는 A/D, 마우스/터치 이동 · Space: 시작/일시정지/발사 · 승리/오버 시 Space/Enter = 새 게임
+        </div>
+      </div>
+
+      {/* 게임 오버 팝업 */}
+      {gameOverOpen && (
+        <div className="fixed inset-0 bg-black/60 grid place-items-center z-50">
+          <div className="bg-neutral-900 text-neutral-100 rounded-2xl p-5 ring-1 ring-neutral-700 max-w-sm w-[92%] shadow-xl">
+            <div className="text-lg font-bold mb-2">게임 오버</div>
+            <div className="text-sm text-neutral-300 mb-4">점수: <span className="font-semibold text-neutral-100">{score}</span> · 레벨: <span className="font-semibold text-neutral-100">{level}/{MAX_LEVEL}</span></div>
+            <div className="flex justify-end gap-2">
+              <button onClick={() => setGameOverOpen(false)} className="px-3 py-2 rounded-lg bg-neutral-800 hover:bg-neutral-700">닫기</button>
+              <button onClick={newGame} className="px-3 py-2 rounded-lg bg-emerald-600 text-emerald-950 hover:brightness-110">다시 시작 (Enter/Space)</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 승리 팝업 */}
+      {winOpen && (
+        <div className="fixed inset-0 bg-black/60 grid place-items-center z-50">
+          <div className="bg-neutral-900 text-neutral-100 rounded-2xl p-5 ring-1 ring-neutral-700 max-w-sm w-[92%] shadow-xl">
+            <div className="text-lg font-bold mb-2">축하합니다! 게임 클리어 🎉</div>
+            <div className="text-sm text-neutral-300 mb-4">최종 점수: <span className="font-semibold text-neutral-100">{score}</span></div>
+            <div className="flex justify-end gap-2">
+              <button onClick={() => setWinOpen(false)} className="px-3 py-2 rounded-lg bg-neutral-800 hover:bg-neutral-700">닫기</button>
+              <button onClick={newGame} className="px-3 py-2 rounded-lg bg-emerald-600 text-emerald-950 hover:brightness-110">새 게임 (Enter/Space)</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
