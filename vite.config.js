@@ -3,7 +3,6 @@ import react from '@vitejs/plugin-react'
 
 // https://vite.dev/config/
 export default defineConfig({
-  base: 'https://sunujh6.github.io/vibecode-break-bricks/',
   plugins: [react()],
-  build: {outDir: 'dist', sourcemap: true },	
+  base: process.env.NODE_ENV === 'production' ? 'https://sunujh6.github.io/vibe-code-break-bricks/' : '/',
 })
