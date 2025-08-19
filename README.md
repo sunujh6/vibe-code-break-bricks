@@ -1,12 +1,36 @@
-# React + Vite
+# Introduction: React + Vite(Vibe Coding)
+이 프로그램은 React+Vite Project를 이용하여 GPT-5 thinking 모델이 생성한 프로그램(Vibe coding)을 github Action를 활용하여 실행하는 벽돌깨기 샘플 프로그램입니다. 
+프로그램 실행은 https://sunujh6.github.io/vibe-code-break-bricks/ 에서 확인할 수 있습니다. 
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+# Running on Local
 
-Currently, two official plugins are available:
+NPM 10.9.3, node.js 22.18.0, vite v7.1.2
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
+-------
+--- upgrade packages ---
 
-## Expanding the ESLint configuration
+$ wget -qO- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.3/install.sh | bash
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+$ nvm insall --lts
+
+-------
+
+$ git clone https://github.com/sunujh6/vibecode-omok
+
+$ cd vibecode-omok
+
+$ npm install 
+
+$ npm install framer-motion lucide-react
+
+## build & running
+
+$ npm run build
+
+$ npm run preview
+
+Type http://localhost:4173/vibecode-omok/ url on your browser
+
+## running with developer mode
+
+$ npm run dev
