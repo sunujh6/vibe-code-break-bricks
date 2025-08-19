@@ -15,7 +15,7 @@ $ nvm insall --lts
 
 -------
 
-$ git clone https://github.com/sunujh6/vibecode-omok
+$ git clone https://github.com/sunujh6/vibe-code-break-bricks
 
 $ cd vibecode-omok
 
@@ -29,7 +29,7 @@ $ npm run build
 
 $ npm run preview
 
-Type http://localhost:4173/vibecode-omok/ url on your browser
+Type http://localhost:4173/vibe-code-break-bricks/ url on your browser
 
 ## running with developer mode
 
